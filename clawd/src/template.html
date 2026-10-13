@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Clawd Club</title>
+<meta name="description" content="Clawd kendi bestelediği house parçasında 3D gece kulübünde dans ediyor.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #09060d;
+    --ink: #f6eee8;
+    --muted: rgba(246, 238, 232, .62);
+    --glass: rgba(20, 14, 24, .55);
+    --line: rgba(255, 255, 255, .12);
+    --clawd: #d97757;
+    --clawd-hi: #ff9a72;
+    --pixel: "Silkscreen", ui-monospace, Menlo, monospace;
+    --sans: "Space Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: var(--sans); overflow: hidden; }
+  canvas#c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+
+  /* ---- açılış ---- */
+  #intro {
+    position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 16px;
+    background: radial-gradient(ellipse at 50% 40%, rgba(217,119,87,.18), rgba(9,6,13,.86) 60%);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    transition: opacity .6s ease, visibility .6s;
+  }
+  #intro.gone { opacity: 0; visibility: hidden; pointer-events: none; }
+  .card { text-align: center; max-width: 520px; width: 100%; }
+  .logo { width: 132px; height: auto; image-rendering: pixelated; animation: hop .52s cubic-bezier(.3,0,.4,1) infinite alternate; filter: drop-shadow(0 12px 24px rgba(217,119,87,.45)); }
+  @keyframes hop { from { transform: translateY(0) scale(1.04,.96); } to { transform: translateY(-14px) scale(.98,1.03); } }
+  h1 { font-family: var(--pixel); font-weight: 700; font-size: clamp(44px, 12vw, 84px); line-height: .95; margin: 22px 0 6px; letter-spacing: .02em;
+       background: linear-gradient(180deg, #ffd0bb, var(--clawd) 70%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  h1 small { display: block; font-size: .34em; color: var(--muted); -webkit-text-fill-color: var(--muted); letter-spacing: .3em; margin-top: 10px; }
+  .card p { color: var(--muted); font-size: 16px; line-height: 1.5; margin: 14px auto 26px; max-width: 380px; }
+  .actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  .primary {
+    border: 0; border-radius: 14px; padding: 15px 26px; font-weight: 700; font-size: 17px; color: #1b0f0a;
+    background: linear-gradient(180deg, var(--clawd-hi), var(--clawd));
+    box-shadow: 0 10px 30px rgba(217,119,87,.45), inset 0 1px 0 rgba(255,255,255,.4);
+    transition: transform .12s, box-shadow .2s;
+  }
+  .primary:hover { transform: translateY(-2px); box-shadow: 0 14px 40px rgba(217,119,87,.6), inset 0 1px 0 rgba(255,255,255,.4); }
+  .ghost { border: 1px solid var(--line); background: rgba(255,255,255,.04); border-radius: 14px; padding: 15px 22px; font-size: 16px; }
+  .ghost:hover { background: rgba(255,255,255,.09); }
+  .hint { font-size: 12.5px !important; margin-top: 22px !important; opacity: .8; }
+  kbd { font-family: var(--pixel); font-size: 10px; padding: 1px 5px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); }
+
+  /* ---- HUD ---- */
+  #hud { position: fixed; inset: 0; z-index: 5; pointer-events: none; transition: opacity .35s; }
+  body.hud-hidden #hud { opacity: 0; }
+  body.hud-hidden #hud * { pointer-events: none !important; }
+  .top { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; gap: 12px;
+         padding: max(14px, env(safe-area-inset-top)) 16px 14px; background: linear-gradient(180deg, rgba(9,6,13,.6), transparent); }
+  .brand { font-family: var(--pixel); font-size: 15px; letter-spacing: .08em; display: flex; align-items: center; gap: 8px; }
+  .brand i { width: 9px; height: 9px; background: var(--clawd); display: inline-block; box-shadow: 0 0 12px var(--clawd); animation: rec 1s steps(1) infinite; }
+  @keyframes rec { 50% { opacity: .25; } }
+  .status { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .status span { font-family: var(--pixel); font-size: 11px; letter-spacing: .06em; padding: 5px 9px; border-radius: 8px; background: var(--glass); border: 1px solid var(--line); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+  #secLabel[data-sec="drop"] { background: var(--clawd); color: #1b0f0a; border-color: transparent; box-shadow: 0 0 18px rgba(217,119,87,.7); }
+  #secLabel[data-sec="build"] { color: #ffd25f; border-color: rgba(255,210,95,.5); }
+  #secLabel[data-sec="groove"] { color: #ff8fd0; }
+  #secLabel[data-sec="break"] { color: #8fb4ff; }
+
+  #toast {
+    position: absolute; left: 50%; top: 22%; transform: translate(-50%, 10px) scale(.92); opacity: 0;
+    font-family: var(--pixel); font-weight: 700; font-size: clamp(30px, 7vw, 64px); letter-spacing: .04em; white-space: nowrap;
+    color: #fff; text-shadow: 0 0 24px rgba(255,140,100,.9), 0 4px 0 rgba(0,0,0,.35);
+  }
+  #toast.show { animation: toast 1.4s cubic-bezier(.2,.9,.3,1.2) forwards; }
+  @keyframes toast {
+    0% { opacity: 0; transform: translate(-50%, 16px) scale(.85); }
+    15% { opacity: 1; transform: translate(-50%, 0) scale(1.04); }
+    25% { transform: translate(-50%, 0) scale(1); }
+    80% { opacity: 1; }
+    100% { opacity: 0; transform: translate(-50%, -10px) scale(1); }
+  }
+
+  .bottom { position: absolute; left: 0; right: 0; bottom: 0; padding: 14px 16px max(14px, env(safe-area-inset-bottom));
+            display: flex; flex-direction: column; gap: 10px; background: linear-gradient(0deg, rgba(9,6,13,.7), transparent); }
+  .moves { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; pointer-events: auto; padding-bottom: 2px; }
+  .moves::-webkit-scrollbar { display: none; }
+  .chip {
+    flex: none; display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px; border-radius: 999px; font-size: 14px; font-weight: 500;
+    background: var(--glass); border: 1px solid var(--line); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    transition: background .2s, border-color .2s, transform .1s;
+  }
+  .chip:hover { border-color: rgba(255,255,255,.3); }
+  .chip:active { transform: scale(.96); }
+  .chip.playing { border-color: var(--clawd); box-shadow: inset 0 0 0 1px var(--clawd); }
+  .chip.active { background: var(--clawd); border-color: var(--clawd); color: #1b0f0a; }
+  .chip.active kbd { color: #1b0f0a; border-color: rgba(0,0,0,.25); }
+  .tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; pointer-events: auto; }
+  .tool { display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px; border-radius: 10px; font-size: 14px;
+          background: var(--glass); border: 1px solid var(--line); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+  .tool:hover { border-color: rgba(255,255,255,.3); }
+  .tool[aria-pressed="true"] { border-color: var(--clawd); color: var(--clawd-hi); }
+  .tool b { font-weight: 700; }
+  .tempo input { accent-color: var(--clawd); width: 110px; }
+  .tempo output { font-family: var(--pixel); font-size: 11px; min-width: 26px; }
+  .spacer { flex: 1; }
+  @media (max-width: 560px) {
+    .brand { font-size: 12px; }
+    .status span { font-size: 10px; padding: 4px 7px; }
+    #barLabel { display: none; }
+    .tool span.lbl { display: none; }
+    .tempo input { width: 80px; }
+    #btnFull { display: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="intro">
+  <div class="card">
+    <svg class="logo" viewBox="0 0 22 14" shape-rendering="crispEdges" aria-hidden="true">
+      <rect x="0.5" y="4.5" width="3" height="2.5" fill="#d97757"/>
+      <rect x="18.5" y="4.5" width="3" height="2.5" fill="#d97757"/>
+      <rect x="4.5" y="9.5" width="1.4" height="3.5" fill="#b35f43"/>
+      <rect x="7.5" y="9.5" width="1.4" height="3.5" fill="#b35f43"/>
+      <rect x="13.1" y="9.5" width="1.4" height="3.5" fill="#b35f43"/>
+      <rect x="16.1" y="9.5" width="1.4" height="3.5" fill="#b35f43"/>
+      <rect x="3.5" y="1.5" width="15" height="8.6" fill="#d97757"/>
+      <rect x="7" y="3.6" width="1.5" height="2.6" fill="#1f1a17"/>
+      <rect x="13.5" y="3.6" width="1.5" height="2.6" fill="#1f1a17"/>
+    </svg>
+    <h1>CLAWD<small>CLUB · GECE VARDİYASI</small></h1>
+    <p>Pist hazır, ışıklar yandı, DJ de Clawd'un kendisi. Sesi aç, gerisini o halleder.</p>
+    <div class="actions">
+      <button id="startMusic" class="primary">▶ Partiyi başlat</button>
+      <button id="startSilent" class="ghost">Sessiz izle</button>
+    </div>
+    <p class="hint"><kbd>Boşluk</kbd> müzik · <kbd>0</kbd>–<kbd>9</kbd> hareket · <kbd>C</kbd> kamera · <kbd>H</kbd> arayüz · <kbd>↑↓</kbd> tempo</p>
+  </div>
+</div>
+
+<div id="hud">
+  <header class="top">
+    <div class="brand"><i></i>CLAWD CLUB</div>
+    <div class="status">
+      <span id="secLabel" data-sec="intro">INTRO</span>
+      <span id="barLabel">BAR 1</span>
+      <span id="bpmLabel">124 BPM</span>
+    </div>
+  </header>
+  <div id="toast"></div>
+  <footer class="bottom">
+    <div class="moves" id="moves" aria-label="Dans hareketleri"></div>
+    <div class="tools">
+      <button class="tool" id="btnMusic" aria-pressed="false" title="Müzik (Boşluk)">♪ <span class="lbl">Müzik</span></button>
+      <button class="tool" id="btnCam" aria-pressed="false" title="Kamera (C)"><span class="lbl">Kamera:</span> <b>Yönetmen</b></button>
+      <label class="tool tempo" title="Tempo (↑↓)"><span class="lbl">Tempo</span> <input type="range" id="tempo" min="96" max="150" step="1" value="124"><output id="tempoVal">124</output></label>
+      <span class="spacer"></span>
+      <button class="tool" id="btnHide" title="Arayüzü gizle (H, geri getirmek için çift tıkla)"><span class="lbl">Gizle</span><span aria-hidden="true">◐</span></button>
+      <button class="tool" id="btnFull" title="Tam ekran (F)">⛶</button>
+    </div>
+  </footer>
+</div>
+
+<script type="module">
+/*__BUNDLE__*/
+</script>
+</body>
+</html>
