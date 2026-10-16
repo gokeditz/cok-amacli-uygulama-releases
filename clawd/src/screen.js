@@ -55,7 +55,7 @@ export class LedScreen {
     // Yazı
     let title = 'CLAWD';
     if (sec.name === 'drop' && sec.i < 2) title = fr(beat * 2) < 0.5 ? 'DROP!' : '';
-    else if (sec.name === 'build') title = sec.i === 3 ? String(4 - Math.floor(fr(beat / 4) * 4)) : 'GET READY';
+    else if (sec.name === 'build') title = sec.i === sec.len - 1 ? String(4 - Math.floor(fr(beat / 4) * 4)) : 'GET READY';
     g.textAlign = 'center';
     g.textBaseline = 'middle';
     g.fillStyle = '#fff';

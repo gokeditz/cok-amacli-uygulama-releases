@@ -23,6 +23,10 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: var(--sans); overflow: hidden; }
   canvas#c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 4; pointer-events: none; touch-action: none; }
+  canvas#game.on { pointer-events: auto; }
+  body.game .moves { display: none; }
+  body.game .top .brand { opacity: 0; }
   button { font: inherit; color: inherit; cursor: pointer; }
 
   /* ---- açılış ---- */
@@ -106,7 +110,37 @@
   .tempo input { accent-color: var(--clawd); width: 110px; }
   .tempo output { font-family: var(--pixel); font-size: 11px; min-width: 26px; }
   .spacer { flex: 1; }
+  .tool select { font: inherit; color: inherit; background: transparent; border: 0; outline: none; cursor: pointer; max-width: 170px; }
+  .tool select option { background: #1a1220; color: var(--ink); }
+  .tool:disabled, .tempo input:disabled { opacity: .45; }
+  #btnRec .dot { width: 9px; height: 9px; border-radius: 50%; background: #ff4d5e; display: inline-block; }
+  #btnRec[aria-pressed="true"] { border-color: #ff4d5e; color: #ff8a95; }
+  #btnRec[aria-pressed="true"] .dot { animation: rec .8s steps(1) infinite; box-shadow: 0 0 10px #ff4d5e; }
+  #recTime { display: none; font-family: var(--pixel); font-size: 11px; }
+  body.rec #recTime { display: inline; }
+  #btnGame { font-weight: 700; }
+  #btnGame[aria-pressed="true"] { background: var(--clawd); color: #1b0f0a; border-color: var(--clawd); }
+
+  #notice {
+    position: absolute; left: 50%; bottom: 128px; transform: translate(-50%, 8px); opacity: 0; max-width: calc(100% - 32px);
+    padding: 9px 16px; border-radius: 999px; background: rgba(20,14,24,.82); border: 1px solid var(--line); font-size: 14px;
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); transition: opacity .25s, transform .25s; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #notice.show { opacity: 1; transform: translate(-50%, 0); }
+  #notice.busy::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 9px; border-radius: 50%;
+    border: 2px solid var(--clawd); border-right-color: transparent; vertical-align: -1px; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  body.game #notice { bottom: auto; top: 108px; }
+
+  #clip { position: fixed; right: 16px; bottom: 120px; z-index: 6; display: none; align-items: center; gap: 10px; padding: 10px 12px;
+          border-radius: 14px; background: rgba(20,14,24,.9); border: 1px solid var(--clawd); box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+  #clip.show { display: flex; }
+  #clip a { color: #1b0f0a; background: var(--clawd); padding: 7px 12px; border-radius: 9px; text-decoration: none; font-weight: 700; }
+  #clip button { background: none; border: 0; color: var(--muted); font-size: 18px; padding: 0 4px; }
+  .actions .tertiary { border: 1px solid rgba(217,119,87,.6); color: var(--clawd-hi); background: rgba(217,119,87,.1); border-radius: 14px; padding: 15px 22px; font-size: 16px; font-weight: 700; }
+  .actions .tertiary:hover { background: rgba(217,119,87,.2); }
   @media (max-width: 560px) {
+    #notice { bottom: 150px; white-space: normal; text-align: center; border-radius: 14px; }
     .brand { font-size: 12px; }
     .status span { font-size: 10px; padding: 4px 7px; }
     #barLabel { display: none; }
@@ -118,6 +152,8 @@
 </head>
 <body>
 <canvas id="c"></canvas>
+<canvas id="game"></canvas>
+<input type="file" id="fileIn" accept="audio/*" hidden>
 
 <div id="intro">
   <div class="card">
@@ -136,9 +172,10 @@
     <p>Pist hazır, ışıklar yandı, DJ de Clawd'un kendisi. Sesi aç, gerisini o halleder.</p>
     <div class="actions">
       <button id="startMusic" class="primary">▶ Partiyi başlat</button>
+      <button id="startGame" class="tertiary">Ritim oyunu</button>
       <button id="startSilent" class="ghost">Sessiz izle</button>
     </div>
-    <p class="hint"><kbd>Boşluk</kbd> müzik · <kbd>0</kbd>–<kbd>9</kbd> hareket · <kbd>C</kbd> kamera · <kbd>H</kbd> arayüz · <kbd>↑↓</kbd> tempo</p>
+    <p class="hint"><kbd>Boşluk</kbd> müzik · <kbd>G</kbd> oyun · <kbd>0</kbd>–<kbd>9</kbd> hareket · <kbd>C</kbd> kamera · <kbd>R</kbd> klip kaydı · <kbd>H</kbd> arayüz<br>Parça menüsünden kendi şarkını yükle, Clawd ona göre dans etsin.</p>
   </div>
 </div>
 
@@ -152,17 +189,32 @@
     </div>
   </header>
   <div id="toast"></div>
+  <div id="notice" role="status" aria-live="polite"></div>
   <footer class="bottom">
     <div class="moves" id="moves" aria-label="Dans hareketleri"></div>
     <div class="tools">
       <button class="tool" id="btnMusic" aria-pressed="false" title="Müzik (Boşluk)">♪ <span class="lbl">Müzik</span></button>
+      <label class="tool" title="Parça"><select id="trackSel" aria-label="Parça">
+        <option value="house">Clawd House</option>
+        <option value="halay">Halay Gecesi</option>
+        <option value="upload">＋ Kendi şarkın…</option>
+      </select></label>
+      <button class="tool" id="btnGame" aria-pressed="false" title="Ritim oyunu (G)">Oyun</button>
+      <button class="tool" id="btnRec" aria-pressed="false" title="Klip kaydet (R)"><span class="dot"></span><span class="lbl">Kayıt</span><span id="recTime">00:00</span></button>
       <button class="tool" id="btnCam" aria-pressed="false" title="Kamera (C)"><span class="lbl">Kamera:</span> <b>Yönetmen</b></button>
       <label class="tool tempo" title="Tempo (↑↓)"><span class="lbl">Tempo</span> <input type="range" id="tempo" min="96" max="150" step="1" value="124"><output id="tempoVal">124</output></label>
       <span class="spacer"></span>
+      <button class="tool" id="btnQuality" title="Kalite (Q)"><span class="lbl">Kalite:</span> <b>Yüksek</b></button>
       <button class="tool" id="btnHide" title="Arayüzü gizle (H, geri getirmek için çift tıkla)"><span class="lbl">Gizle</span><span aria-hidden="true">◐</span></button>
       <button class="tool" id="btnFull" title="Tam ekran (F)">⛶</button>
     </div>
   </footer>
+</div>
+
+<div id="clip" role="dialog" aria-label="Klip hazır">
+  <span>Klip hazır · <span id="clipSize"></span></span>
+  <a id="clipLink" href="#" download>İndir</a>
+  <button id="clipClose" aria-label="Kapat">×</button>
 </div>
 
 <script type="module">

@@ -1,14 +1,16 @@
 // Web Audio ile anlık sentezlenen house parçası. Hiçbir ses dosyası yok,
 // her vuruş, bas ve akor burada osilatör ve gürültüden üretiliyor.
-import { sectionAt, kickAt, clapAt, hatAt, PROG, BASS, STABS, ARP } from './song.js';
+import { house } from './tracks.js';
 
 const mtof = (m) => 440 * Math.pow(2, (m - 69) / 12);
 const MASTER = 0.85;
 
 export class Music {
   constructor() {
-    this.bpm = 124;
+    this.track = house;
+    this.bpm = house.bpm;
     this.playing = false;
+    this.zLast = [0, 0];
     this.ctx = null;
     this.step = 0;
     this.startTime = 0;
@@ -35,6 +37,11 @@ export class Music {
     this.master.connect(comp);
     comp.connect(this.analyser);
     this.analyser.connect(ctx.destination);
+    this.recDest = ctx.createMediaStreamDestination ? ctx.createMediaStreamDestination() : null;
+    if (this.recDest) this.analyser.connect(this.recDest);
+    this.songGain = ctx.createGain();
+    this.songGain.gain.value = 0.9;
+    this.songGain.connect(this.analyser);
     this.spectrum = new Uint8Array(this.analyser.frequencyBinCount);
 
     // Kick vurdukça bas ve akorları bastıran sidechain
@@ -92,21 +99,59 @@ export class Music {
   // Kulağa ulaşan sese göre şu anki vuruş
   get beat() { return ((this.ctx.currentTime - this.latency - this.startTime) * this.bpm) / 60; }
 
+  setTrack(track) {
+    if (this.playing) this.pause(true);
+    this.track = track;
+    this.bpm = track.bpm;
+    this.zLast = [0, 0];
+    this.updateDelay();
+  }
+
   async play(fromBeat = 0) {
     this.init();
     await this.ctx.resume();
     const t = this.ctx.currentTime;
+    const t0 = t + 0.05;
+    const beatSec = 60 / this.bpm;
     this.master.gain.cancelScheduledValues(t);
     this.master.gain.setValueAtTime(MASTER, t);
-    this.startTime = t + 0.05 - (fromBeat * 60) / this.bpm;
-    this.step = Math.max(0, Math.ceil(fromBeat * 4));
+    const tr = this.track;
+    if (tr.buffer) {
+      this.stopSource();
+      const src = this.ctx.createBufferSource();
+      src.buffer = tr.buffer;
+      src.loop = true;
+      const loopLen = tr.totalBars * 4 * beatSec;
+      src.loopStart = tr.firstBeat;
+      src.loopEnd = Math.min(tr.buffer.duration, tr.firstBeat + loopLen);
+      src.connect(this.songGain);
+      if (fromBeat <= 0) {
+        src.start(t0, 0);
+        this.startTime = t0 + tr.firstBeat;
+      } else {
+        src.start(t0, tr.firstBeat + ((fromBeat * beatSec) % loopLen));
+        this.startTime = t0 - fromBeat * beatSec;
+      }
+      this.src = src;
+    } else {
+      this.startTime = t0 - fromBeat * beatSec;
+      this.step = Math.max(0, Math.ceil(fromBeat * 4));
+      this.tick();
+      clearInterval(this.timer);
+      this.timer = setInterval(() => this.tick(), 25);
+    }
     this.playing = true;
-    this.tick();
-    clearInterval(this.timer);
-    this.timer = setInterval(() => this.tick(), 25);
   }
 
-  pause() {
+  stopSource() {
+    if (this.src) {
+      try { this.src.stop(); } catch { /* zaten durmuş */ }
+      this.src.disconnect();
+      this.src = null;
+    }
+  }
+
+  pause(hard = false) {
     if (!this.playing) return;
     this.playing = false;
     clearInterval(this.timer);
@@ -115,11 +160,17 @@ export class Music {
     const g = this.master.gain;
     g.cancelScheduledValues(t);
     g.setValueAtTime(g.value, t);
-    g.linearRampToValueAtTime(0, t + 0.08);
-    setTimeout(() => { if (!this.playing) this.ctx.suspend(); }, 160);
+    g.linearRampToValueAtTime(0, t + 0.06);
+    const src = this.src;
+    this.src = null;
+    setTimeout(() => {
+      if (src) { try { src.stop(); } catch { /* yok say */ } src.disconnect(); }
+      if (!this.playing && !hard) this.ctx.suspend();
+    }, 90);
   }
 
   setBpm(bpm) {
+    if (!this.track.tempo) return;
     if (this.playing) {
       const cur = this.beat;
       this.bpm = bpm;
@@ -141,47 +192,8 @@ export class Music {
     for (;;) {
       const t = this.startTime + this.step * this.stepDur;
       if (t > ahead) break;
-      if (t >= ctx.currentTime - 0.02) this.playStep(this.step, Math.max(t, ctx.currentTime));
+      if (t >= ctx.currentTime - 0.02) this.track.schedule(this, this.step, Math.max(t, ctx.currentTime));
       this.step++;
-    }
-  }
-
-  playStep(n, t) {
-    const bar = Math.floor(n / 16);
-    const s = n % 16;
-    const sec = sectionAt(bar);
-    const ch = PROG[bar % 4];
-    const sd = this.stepDur;
-
-    if (kickAt(bar, s)) this.kick(t);
-    const clap = clapAt(bar, s);
-    if (clap) this.clap(t, clap);
-    const hat = hatAt(bar, s);
-    if (hat.c) this.hat(t, hat.c, false);
-    if (hat.o) this.hat(t, hat.o, true);
-
-    if ((sec.name === 'groove' || sec.name === 'drop') && BASS[s] !== undefined) {
-      this.bass(t, ch.root + BASS[s], sd * 0.95);
-    }
-    if (sec.name === 'drop' && STABS.includes(s)) this.stab(t, ch.chord, sd * 1.6);
-
-    if (s === 0) {
-      if (sec.name === 'intro' || sec.name === 'break') this.pad(t, ch.chord, sd * 16, 900, 900);
-      else if (sec.name === 'groove' && sec.i >= 4) this.pad(t, ch.chord, sd * 16, 700, 1400);
-      else if (sec.name === 'build') {
-        const p = sec.i / 4;
-        this.pad(t, ch.chord, sd * 16, 400 + 3000 * p, 400 + 3000 * (p + 0.25));
-      }
-      if (sec.name === 'build' && sec.i === 0) this.riser(t, sd * 64);
-      if ((sec.name === 'drop' && sec.i % 8 === 0) || (sec.name === 'groove' && sec.i === 0)) this.crash(t);
-      if (sec.name === 'drop' && sec.i === 0) this.boom(t);
-    }
-
-    if ((sec.name === 'drop' && sec.i >= 8) || sec.name === 'break') {
-      if (sec.name === 'drop' || s % 2 === 0) {
-        const note = ch.chord[ARP[s % 8]] + 12 + (s >= 8 ? 12 : 0);
-        this.arp(t, note, sec.name === 'drop' ? 0.06 : 0.04);
-      }
     }
   }
 
@@ -380,5 +392,117 @@ export class Music {
     og.connect(this.master);
     o.start(t);
     o.stop(t + dur + 0.05);
+  }
+
+  dum(t, vol) {
+    const c = this.ctx;
+    const o = c.createOscillator();
+    const g = c.createGain();
+    o.frequency.setValueAtTime(98, t);
+    o.frequency.exponentialRampToValueAtTime(50, t + 0.2);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+    o.connect(g).connect(this.master);
+    o.start(t);
+    o.stop(t + 0.6);
+    this.noiseHit(t, 0.09, 'lowpass', 500, vol * 0.7, [this.master]);
+    const d = this.duck.gain;
+    d.cancelScheduledValues(t);
+    d.setValueAtTime(0.55, t);
+    d.linearRampToValueAtTime(1, t + 0.2);
+  }
+
+  tek(t, vol) {
+    this.noiseHit(t, 0.05, 'highpass', 2500, vol * 0.6, [this.master, this.verbSend]);
+    const c = this.ctx;
+    const o = c.createOscillator();
+    const g = c.createGain();
+    o.type = 'triangle';
+    o.frequency.setValueAtTime(1150, t);
+    o.frequency.exponentialRampToValueAtTime(650, t + 0.03);
+    g.gain.setValueAtTime(vol * 0.25, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+    o.connect(g).connect(this.master);
+    o.start(t);
+    o.stop(t + 0.06);
+  }
+
+  darbuka(t, vol) {
+    this.noiseHit(t, 0.06, 'bandpass', 3800, vol, [this.master], 3);
+  }
+
+  // Zurna: geniz sesi için testere + kare dalga, tepe filtresi, gecikmeli vibrato ve glissando
+  zurna(t, midi, dur, vol, voice = 0) {
+    const c = this.ctx;
+    const f = mtof(midi);
+    const from = this.zLast[voice] || f;
+    this.zLast[voice] = f;
+    const o1 = c.createOscillator();
+    o1.type = 'sawtooth';
+    const o2 = c.createOscillator();
+    o2.type = 'square';
+    o2.detune.value = 6;
+    for (const o of [o1, o2]) {
+      o.frequency.setValueAtTime(from, t);
+      o.frequency.exponentialRampToValueAtTime(f, t + 0.035);
+    }
+    const lfo = c.createOscillator();
+    lfo.frequency.value = 5.6;
+    const lfoG = c.createGain();
+    lfoG.gain.setValueAtTime(0, t);
+    lfoG.gain.linearRampToValueAtTime(f * 0.009, t + Math.min(0.3, dur));
+    lfo.connect(lfoG);
+    lfoG.connect(o1.frequency);
+    lfoG.connect(o2.frequency);
+    const hp = c.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 380;
+    const pk = c.createBiquadFilter();
+    pk.type = 'peaking';
+    pk.frequency.value = 1700;
+    pk.Q.value = 1.2;
+    pk.gain.value = 9;
+    const lp = c.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 5200;
+    const g = c.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(vol, t + 0.018);
+    g.gain.setValueAtTime(vol, t + Math.max(0.02, dur - 0.03));
+    g.gain.linearRampToValueAtTime(0, t + dur + 0.03);
+    o1.connect(hp);
+    o2.connect(hp);
+    hp.connect(pk).connect(lp).connect(g);
+    g.connect(this.master);
+    g.connect(this.verbSend);
+    g.connect(this.delaySend);
+    const end = t + dur + 0.06;
+    for (const o of [o1, o2, lfo]) { o.start(t); o.stop(end); }
+  }
+
+  // Dem tutan ikinci zurna
+  drone(t, midi, dur) {
+    const c = this.ctx;
+    const f = mtof(midi);
+    const lp = c.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 1300;
+    const g = c.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.028, t + 0.3);
+    g.gain.setValueAtTime(0.028, t + dur - 0.05);
+    g.gain.linearRampToValueAtTime(0, t + dur + 0.25);
+    lp.connect(g);
+    g.connect(this.master);
+    g.connect(this.verbSend);
+    for (const [type, det] of [['sawtooth', 0], ['square', 7]]) {
+      const o = c.createOscillator();
+      o.type = type;
+      o.frequency.value = f;
+      o.detune.value = det;
+      o.connect(lp);
+      o.start(t);
+      o.stop(t + dur + 0.3);
+    }
   }
 }

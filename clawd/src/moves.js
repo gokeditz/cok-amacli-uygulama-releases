@@ -221,6 +221,43 @@ const MOVE_FNS = {
     };
   },
 
+  // Omuz titretme: halayın vazgeçilmezi
+  omuz(t) {
+    const ph = fr(t);
+    const dip = hit(ph, 7);
+    const alt = Math.sin(TAU * t * 2);
+    const shim = Math.sin(TAU * t * 4);
+    return {
+      crouch: 0.16 + 0.14 * dip,
+      twist: 0.13 * shim, tiltZ: 0.05 * shim,
+      x: 0.35 * Math.sin((PI * t) / 4),
+      aLr: 0.45 + 0.35 * Math.max(0, alt), aRr: 0.45 + 0.35 * Math.max(0, -alt),
+      aLs: 0.55, aRs: 0.55, aLe: 0.9, aRe: 0.9,
+      sqY: 1 - 0.05 * dip, lookX: 0.4 * Math.sin((PI * t) / 4), eyeS: 0.75,
+      l0z: -0.12 * dip, l3z: 0.12 * dip,
+    };
+  },
+
+  // Moonwalk: yüzü bir yana dönük, ayaklar kayarak geri geri
+  moonwalk(t) {
+    const c = Math.cos((PI * t) / 8);
+    const face = clamp(c * 4, -1, 1);
+    const slide = Math.sin(TAU * t);
+    const o = {
+      x: 2.0 * Math.sin((PI * t) / 8),
+      ry: -(PI / 2) * face,
+      crouch: 0.1 + 0.05 * Math.abs(slide),
+      tiltX: 0.08,
+      aLs: 0.5 * slide, aRs: -0.5 * slide, aLr: 0.25, aRr: 0.25,
+      lift: 0.03 * Math.abs(Math.sin(TAU * t * 2)),
+    };
+    // Ön ve arka bacak çiftleri sırayla topuk kaldırır
+    const a = Math.max(0, slide) * 0.55;
+    const b = Math.max(0, -slide) * 0.55;
+    o.l0x = -a; o.l1x = -a; o.l2x = -b; o.l3x = -b;
+    return o;
+  },
+
   // Build-up boyunca gerilim: çömelir, titrer, kollar yavaş yavaş havaya kalkar
   charge(t, ctx) {
     const p = clamp(ctx.prog ?? 0.5, 0, 1);
@@ -249,6 +286,8 @@ export const MOVES = {
   disco: { name: 'Disko' },
   halay: { name: 'Halay' },
   star: { name: 'Yıldız' },
+  omuz: { name: 'Omuz' },
+  moonwalk: { name: 'Moonwalk' },
   charge: { name: 'Gerilim', hidden: true },
 };
 for (const id of Object.keys(MOVES)) MOVES[id].fn = MOVE_FNS[id];
@@ -263,10 +302,10 @@ export const hash = (n) => {
   return (x ^ (x >>> 16)) >>> 0;
 };
 
-const GROOVE_POOL = ['bounce', 'crab', 'disco', 'robot', 'shuffle', 'halay', 'wave'];
-const DROP_POOL = ['spin', 'shuffle', 'headbang', 'disco', 'crab', 'robot', 'halay', 'star'];
+const GROOVE_POOL = ['bounce', 'crab', 'disco', 'robot', 'shuffle', 'halay', 'wave', 'moonwalk'];
+const DROP_POOL = ['spin', 'shuffle', 'headbang', 'disco', 'crab', 'robot', 'halay', 'star', 'omuz'];
 
-function pick(pool, k, salt) {
+export function pick(pool, k, salt) {
   const a = pool[hash(k * 7 + salt) % pool.length];
   const prev = pool[hash((k - 1) * 7 + salt) % pool.length];
   return a === prev ? pool[(pool.indexOf(a) + 1) % pool.length] : a;

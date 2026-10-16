@@ -10,10 +10,16 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 
 import { Clawd } from './clawd.js';
-import { MOVES, evalMove, blendPose, mirrorPose, autoMove, hash, fr, clamp, lerp, smooth } from './moves.js';
+import { MOVES, evalMove, blendPose, mirrorPose, hash, fr, clamp, lerp, smooth } from './moves.js';
 import { Music } from './music.js';
-import { sectionAt, kickAt, SECTION_ENERGY } from './song.js';
+import { SECTION_ENERGY } from './song.js';
 import { LedScreen } from './screen.js';
+import { TRACKS, customTrack } from './tracks.js';
+import { analyzeSong } from './analysis.js';
+import { Lasers, Particles, FloorSmoke, FIRE_RAMP, CO2_RAMP, FIRE, CO2 } from './fx.js';
+import { Crowd } from './crowd.js';
+import { RhythmGame } from './game.js';
+import { ClipRecorder } from './recorder.js';
 
 const $ = (id) => document.getElementById(id);
 const rand = (a = 0, b = 1) => a + Math.random() * (b - a);
@@ -95,6 +101,13 @@ const reflector = new Reflector(new THREE.PlaneGeometry(60, 60), {
 });
 reflector.rotation.x = -Math.PI / 2;
 scene.add(reflector);
+const plainFloor = new THREE.Mesh(
+  new THREE.PlaneGeometry(60, 60),
+  new THREE.MeshStandardMaterial({ color: 0x141018, roughness: 0.25, metalness: 0.6, envMapIntensity: 0.4 }),
+);
+plainFloor.rotation.x = -Math.PI / 2;
+plainFloor.visible = false;
+scene.add(plainFloor);
 
 const TN = 16;
 const tileGeo = new THREE.PlaneGeometry(0.93, 0.93);
@@ -329,20 +342,30 @@ const backups = [-1, 1].map((side) => {
   return c;
 });
 
-// ---------------------------------------------------------------- crowd
-const crowd = [];
-for (let row = 0; row < 2; row++) {
-  for (let k = 0; k < 11; k++) {
-    crowd.push({
-      x: -7 + k * 1.4 + (row ? 0.7 : 0) + rand(-0.25, 0.25),
-      z: 6.4 + row * 1.35 + rand(-0.2, 0.2),
-      ph: rand(-0.08, 0.08), s: rand(0.8, 1.1), arms: Math.random() < 0.55, ry: rand(-0.3, 0.3),
-    });
-  }
+// ---------------------------------------------------------------- crowd & show fx
+const crowd = new Crowd(scene);
+const lasers = new Lasers(scene);
+const pyro = new Particles(scene, { count: 1800, ramp: FIRE_RAMP, sizeGrow: 0.8 });
+const co2 = new Particles(scene, { count: 500, ramp: CO2_RAMP, sizeGrow: 1.4 });
+const smoke = new FloorSmoke(scene);
+const NOZZLES = [[-6.8, -2.5], [-6.8, 2.5], [6.8, -2.5], [6.8, 2.5]].map(([x, z]) => {
+  const m = new THREE.Mesh(new RoundedBoxGeometry(0.5, 0.3, 0.5, 2, 0.05), metalMat);
+  m.position.set(x, 0.15, z);
+  scene.add(m);
+  return new THREE.Vector3(x, 0.32, z);
+});
+const pyroLights = [-1, 1].map((side) => {
+  const l = new THREE.PointLight(0xff7a2a, 0, 0, 2);
+  l.position.set(side * 6.8, 2.2, 0);
+  scene.add(l);
+  return l;
+});
+function firePyro(duration = 0.7, which = [0, 1, 2, 3]) {
+  for (const i of which) pyro.jet(NOZZLES[i], duration, 170, FIRE);
 }
-const crowdBodies = new THREE.InstancedMesh(new RoundedBoxGeometry(1.0, 0.72, 0.6, 2, 0.1), silhouetteMat, crowd.length);
-const crowdArms = new THREE.InstancedMesh(new RoundedBoxGeometry(0.16, 0.55, 0.16, 1, 0.05), silhouetteMat, crowd.length * 2);
-scene.add(crowdBodies, crowdArms);
+function fireCO2(duration = 0.9) {
+  for (const n of NOZZLES) co2.jet(n, duration, 55, CO2);
+}
 
 // ---------------------------------------------------------------- confetti
 const CN = 600;
@@ -379,7 +402,8 @@ function burstConfetti(n = CN) {
 
 // ---------------------------------------------------------------- music & clock
 const music = new Music();
-const clock = { bpm: 124, base: 0, anchor: performance.now() / 1000 };
+const clock = { bpm: music.bpm, base: 0, anchor: performance.now() / 1000 };
+const track = () => music.track;
 function currentBeat() {
   if (music.playing) return music.beat;
   return clock.base + ((performance.now() / 1000 - clock.anchor) * clock.bpm) / 60;
@@ -392,8 +416,9 @@ function setBpm(bpm) {
   resetSilentClock(currentBeat());
   clock.bpm = bpm;
   music.setBpm(bpm);
-  $('tempoVal').textContent = bpm;
-  $('bpmLabel').textContent = `${bpm} BPM`;
+  $('tempo').value = String(Math.round(bpm));
+  $('tempoVal').textContent = Math.round(bpm);
+  $('bpmLabel').textContent = `${Math.round(bpm)} BPM`;
 }
 async function toggleMusic(force) {
   const want = force ?? !music.playing;
@@ -401,9 +426,10 @@ async function toggleMusic(force) {
     try {
       await music.play(Math.max(0, currentBeat()));
     } catch {
-      toast('Ses başlatılamadı');
+      notice('Ses başlatılamadı', 2500);
     }
   } else if (!want && music.playing) {
+    if (game.active) stopGame();
     const b = music.beat;
     music.pause();
     resetSilentClock(b);
@@ -417,10 +443,14 @@ const state = {
   cam: 'auto',
   move: { id: 'idle', since: 0, prev: null },
   lastSec: null,
+  lastBar: -1,
   shot: { key: '', name: 'wide', start: 0 },
   flash: 0,
   energy: 0.25,
   hue: 0.05,
+  fever: false,
+  quality: 'high',
+  fl: { armL: 0, armR: 0, stomp: 0, jump: 0, stumble: 0, dir: 1 },
 };
 
 // ---------------------------------------------------------------- camera director
@@ -556,37 +586,12 @@ function updateHeads(beat, sec, prog, pulse, energy) {
     hd.light.color.copy(hd.color);
     hd.light.intensity = inten * (0.5 + 0.5 * energy) * 0.45;
     hd.beam.material.uniforms.uColor.value.copy(hd.color);
-    hd.beam.material.uniforms.uOpacity.value = op * 1.6;
+    hd.beam.material.uniforms.uOpacity.value = op * 1.3;
     hd.lens.material.color.copy(hd.color).multiplyScalar(3);
   }
 }
 
 const dummy = new THREE.Object3D();
-function updateCrowd(beat, sec, prog, energy) {
-  let amp = { intro: 0.02, groove: 0.12, build: 0.05 + prog * 0.3, drop: 0.38, break: 0.04 }[sec.name];
-  const armsUp = sec.name === 'drop' || (sec.name === 'build' && prog > 0.5);
-  crowd.forEach((m, i) => {
-    const jump = amp * Math.sin(Math.PI * fr(beat + m.ph)) * m.s;
-    const y = 0.36 * m.s + jump;
-    dummy.position.set(m.x, y, m.z);
-    dummy.rotation.set(0, m.ry, 0);
-    dummy.scale.setScalar(m.s);
-    dummy.updateMatrix();
-    crowdBodies.setMatrixAt(i, dummy.matrix);
-    for (let a = 0; a < 2; a++) {
-      const side = a ? 1 : -1;
-      const up = armsUp && m.arms;
-      dummy.position.set(m.x + side * 0.42 * m.s, y + (up ? 0.6 : 0.05) * m.s, m.z);
-      dummy.rotation.set(0, m.ry, up ? -side * (0.35 + 0.15 * Math.sin(beat * Math.PI + i)) : 0);
-      dummy.scale.setScalar(up ? m.s : 0.0001);
-      dummy.updateMatrix();
-      crowdArms.setMatrixAt(i * 2 + a, dummy.matrix);
-    }
-  });
-  crowdBodies.instanceMatrix.needsUpdate = true;
-  crowdArms.instanceMatrix.needsUpdate = true;
-}
-
 function updateConfetti(dt, time) {
   for (let i = 0; i < CN; i++) {
     const q = conf[i];
@@ -615,8 +620,157 @@ function updateConfetti(dt, time) {
   confetti.instanceMatrix.needsUpdate = true;
 }
 
+// ---------------------------------------------------------------- game
+const game = new RhythmGame($('game'), {
+  clock: () => ({ beat: currentBeat(), spb: 60 / (music.playing ? music.bpm : clock.bpm) }),
+  onHit(lane, kind) {
+    const f = state.fl;
+    const k = kind === 'perfect' ? 1 : kind === 'great' ? 0.8 : 0.6;
+    if (lane === 0) f.armL = k;
+    else if (lane === 3) f.armR = k;
+    else if (lane === 1) f.stomp = k;
+    else f.jump = k;
+  },
+  onMiss() {
+    state.fl.stumble = 1;
+    state.fl.dir = Math.random() < 0.5 ? -1 : 1;
+  },
+  onMilestone(n) {
+    toast(`${n} KOMBO!`);
+    firePyro(0.6);
+    burstConfetti(n >= 100 ? 400 : 180);
+  },
+  onFever(on) {
+    state.fever = on;
+    if (on) {
+      toast('FEVER!');
+      firePyro(1.2);
+      fireCO2(0.8);
+      state.flash = 0.6;
+    }
+  },
+});
+
+async function startGame() {
+  selectMove('auto');
+  if (state.cam === 'free') setCam('auto');
+  document.body.classList.add('game');
+  $('btnGame').setAttribute('aria-pressed', 'true');
+  if (music.playing) music.pause(true);
+  resetSilentClock(0);
+  state.move = { id: 'idle', since: 0, prev: null };
+  await toggleMusic(true);
+  game.start(track());
+  notice('← ↓ ↑ → ya da D F J K · telefonda şeritlere dokun', 3500);
+}
+function stopGame() {
+  if (!game.active) return;
+  const r = `Skor ${game.score.toLocaleString('tr-TR')} · En iyi kombo ${game.maxCombo} · İsabet %${game.accuracy.toFixed(1)}`;
+  game.stop();
+  state.fever = false;
+  document.body.classList.remove('game');
+  $('btnGame').setAttribute('aria-pressed', 'false');
+  if (game.judged) notice(r, 5000);
+}
+
+// ---------------------------------------------------------------- recorder
+const recorder = new ClipRecorder(canvas);
+async function toggleRecord() {
+  if (!recorder.supported) return notice('Bu tarayıcı video kaydını desteklemiyor', 3000);
+  if (recorder.recording) {
+    const blob = await recorder.stop();
+    document.body.classList.remove('rec');
+    $('btnRec').setAttribute('aria-pressed', 'false');
+    if (!blob || !blob.size) return notice('Kayıt boş çıktı, biraz daha uzun kaydetmeyi dene', 3000);
+    const url = URL.createObjectURL(blob);
+    const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
+    const a = $('clipLink');
+    a.href = url;
+    a.download = `clawd-club-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${ext}`;
+    $('clipSize').textContent = `${(blob.size / 1048576).toFixed(1)} MB`;
+    $('clip').classList.add('show');
+    return;
+  }
+  if (!music.playing) await toggleMusic(true);
+  recorder.start(music.recDest?.stream);
+  document.body.classList.add('rec');
+  $('btnRec').setAttribute('aria-pressed', 'true');
+}
+$('clipClose').addEventListener('click', () => $('clip').classList.remove('show'));
+
+// ---------------------------------------------------------------- tracks
+const trackSel = $('trackSel');
+let customLoaded = null;
+async function switchTrack(tr) {
+  const wasPlaying = music.playing || game.active;
+  if (game.active) stopGame();
+  music.setTrack(tr);
+  clock.bpm = tr.bpm;
+  resetSilentClock(0);
+  setBpm(tr.bpm);
+  $('tempo').disabled = !tr.tempo;
+  state.move = { id: 'idle', since: 0, prev: null };
+  state.lastSec = null;
+  $('btnMusic').setAttribute('aria-pressed', 'false');
+  if (wasPlaying) await toggleMusic(true);
+  toast(tr.name);
+}
+trackSel.addEventListener('change', () => {
+  const v = trackSel.value;
+  if (v === 'upload') {
+    trackSel.value = customLoaded ? 'custom' : music.track.id;
+    $('fileIn').click();
+  } else if (v === 'custom' && customLoaded) switchTrack(customLoaded);
+  else if (TRACKS[v]) switchTrack(TRACKS[v]);
+});
+$('fileIn').addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  music.init();
+  try {
+    notice('Şarkı yükleniyor…', 0, true);
+    const data = await file.arrayBuffer();
+    const res = await analyzeSong(music.ctx, data, (step) => notice(`${step}…`, 0, true));
+    const name = file.name.replace(/\.[^.]+$/, '').slice(0, 40);
+    customLoaded = customTrack(res, name);
+    window.clawdClub.analysis = res;
+    let opt = trackSel.querySelector('option[value="custom"]');
+    if (!opt) {
+      opt = document.createElement('option');
+      opt.value = 'custom';
+      trackSel.insertBefore(opt, trackSel.querySelector('option[value="upload"]'));
+    }
+    opt.textContent = `♫ ${name}`;
+    trackSel.value = 'custom';
+    notice(`${res.bpm.toFixed(1)} BPM bulundu · ${res.totalBars} ölçü · ${res.sections.filter((x) => x.name === 'drop' && x.i === 0).length} drop`, 4000);
+    await switchTrack(customLoaded);
+    if (!music.playing) await toggleMusic(true);
+  } catch (err) {
+    console.error(err);
+    notice(`Şarkı çözülemedi: ${err.message || 'bilinmeyen hata'}`, 4000);
+  }
+});
+
+// ---------------------------------------------------------------- quality
+function applyQuality(q) {
+  state.quality = q;
+  const high = q === 'high';
+  const pr = high ? DPR : 1;
+  renderer.setPixelRatio(pr);
+  composer.setPixelRatio(pr);
+  reflector.visible = high;
+  plainFloor.visible = !high;
+  key.castShadow = high;
+  shadowPlane.visible = high;
+  dust.visible = high;
+  resize();
+  $('btnQuality').querySelector('b').textContent = high ? 'Yüksek' : 'Düşük';
+}
+const perf = { frames: 0, time: 0, checked: false };
+
 // ---------------------------------------------------------------- UI
-const MOVE_ORDER = ['bounce', 'crab', 'robot', 'shuffle', 'headbang', 'spin', 'wave', 'disco', 'halay', 'star', 'idle'];
+const MOVE_ORDER = ['bounce', 'crab', 'robot', 'shuffle', 'headbang', 'spin', 'wave', 'disco', 'halay', 'omuz', 'moonwalk', 'star', 'idle'];
 const movesEl = $('moves');
 function chip(label, id, keyHint) {
   const b = document.createElement('button');
@@ -629,6 +783,7 @@ function chip(label, id, keyHint) {
 chip('Otomatik', 'auto', '0');
 MOVE_ORDER.forEach((id, i) => chip(MOVES[id].name, id, i < 9 ? String(i + 1) : ''));
 function selectMove(id) {
+  if (game.active && id !== 'auto') return;
   state.manual = id === 'auto' ? null : id;
   refreshChips();
 }
@@ -650,6 +805,15 @@ function toast(text) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), 1400);
 }
+let noticeTimer = 0;
+function notice(text, ms = 2500, busy = false) {
+  const el = $('notice');
+  el.textContent = text;
+  el.classList.toggle('busy', busy);
+  el.classList.add('show');
+  clearTimeout(noticeTimer);
+  if (ms) noticeTimer = setTimeout(() => el.classList.remove('show'), ms);
+}
 
 function setCam(mode) {
   state.cam = mode;
@@ -657,7 +821,7 @@ function setCam(mode) {
   if (mode === 'free') controls.target.set(0, 1.4, 0);
   $('btnCam').querySelector('b').textContent = mode === 'free' ? 'Serbest' : 'Yönetmen';
   $('btnCam').setAttribute('aria-pressed', String(mode === 'free'));
-  if (mode === 'free') toast('Sürükle, döndür, yakınlaş');
+  if (mode === 'free') notice('Sürükle, döndür, yakınlaş', 2000);
 }
 
 function toggleHud(force) {
@@ -665,17 +829,23 @@ function toggleHud(force) {
   document.body.classList.toggle('hud-hidden', hidden);
 }
 
-async function start(withMusic) {
+async function start(mode) {
   $('intro').classList.add('gone');
+  perf.frames = 0; perf.time = 0;
+  if (mode === 'game') return startGame();
   resetSilentClock(0);
   state.move = { id: 'idle', since: 0, prev: null };
-  if (withMusic) await toggleMusic(true);
+  if (mode === 'music') await toggleMusic(true);
 }
 
-$('startMusic').addEventListener('click', () => start(true));
-$('startSilent').addEventListener('click', () => start(false));
+$('startMusic').addEventListener('click', () => start('music'));
+$('startGame').addEventListener('click', () => start('game'));
+$('startSilent').addEventListener('click', () => start('silent'));
 $('btnMusic').addEventListener('click', () => toggleMusic());
+$('btnGame').addEventListener('click', () => (game.active ? stopGame() : startGame()));
+$('btnRec').addEventListener('click', () => toggleRecord());
 $('btnCam').addEventListener('click', () => setCam(state.cam === 'free' ? 'auto' : 'free'));
+$('btnQuality').addEventListener('click', () => applyQuality(state.quality === 'high' ? 'low' : 'high'));
 $('btnHide').addEventListener('click', () => toggleHud(true));
 $('btnFull').addEventListener('click', () => {
   if (document.fullscreenElement) document.exitFullscreen();
@@ -685,15 +855,30 @@ $('tempo').addEventListener('input', (e) => setBpm(Number(e.target.value)));
 canvas.addEventListener('dblclick', () => toggleHud(false));
 
 addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
+  if (e.target.tagName === 'SELECT' || (e.target.tagName === 'INPUT' && e.target.type !== 'range')) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (game.active && game.key(e)) { e.preventDefault(); return; }
   const k = e.key.toLowerCase();
-  if (k === ' ') { e.preventDefault(); if (!$('intro').classList.contains('gone')) start(true); else toggleMusic(); return; }
+  if (k === ' ') {
+    e.preventDefault();
+    if (!$('intro').classList.contains('gone')) start('music');
+    else toggleMusic();
+    return;
+  }
+  if (k === 'escape' && game.active) return stopGame();
   if (k === '0') return selectMove('auto');
   if (/^[1-9]$/.test(k)) return selectMove(MOVE_ORDER[Number(k) - 1]);
   if (k === 'c') return setCam(state.cam === 'free' ? 'auto' : 'free');
+  if (k === 'g') { if (!$('intro').classList.contains('gone')) return start('game'); return game.active ? stopGame() : startGame(); }
+  if (k === 'r') return toggleRecord();
+  if (k === 'q') return $('btnQuality').click();
   if (k === 'h') return toggleHud();
   if (k === 'f') return $('btnFull').click();
-  if (k === 'arrowup' || k === 'arrowdown') {
+  if (k === '[' || k === ']') {
+    game.offsetMs += k === ']' ? 10 : -10;
+    return notice(`Gecikme ayarı: ${game.offsetMs > 0 ? '+' : ''}${game.offsetMs} ms`, 1500);
+  }
+  if ((k === 'arrowup' || k === 'arrowdown') && track().tempo) {
     e.preventDefault();
     const el = $('tempo');
     el.value = String(clamp(Number(el.value) + (k === 'arrowup' ? 2 : -2), Number(el.min), Number(el.max)));
@@ -703,12 +888,13 @@ addEventListener('keydown', (e) => {
 
 function resize() {
   const w = innerWidth, h = innerHeight;
+  const pr = renderer.getPixelRatio();
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
   composer.setSize(w, h);
   bloom.setSize(w, h);
-  reflector.getRenderTarget().setSize(Math.floor(w * DPR * 0.5), Math.floor(h * DPR * 0.5));
+  reflector.getRenderTarget().setSize(Math.floor(w * pr * 0.5), Math.floor(h * pr * 0.5));
 }
 addEventListener('resize', resize);
 
@@ -716,43 +902,60 @@ addEventListener('resize', resize);
 let last = performance.now();
 const ctxObj = { prog: 0 };
 const SPARKLE_SEC = { intro: 0.15, groove: 0.45, build: 0.3, drop: 0.9, break: 0.25 };
+const SMOKE_SEC = { intro: 0.2, groove: 0.1, build: 0.16, drop: 0.07, break: 0.24 };
+const smokeColor = new THREE.Color();
 
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
+  const rawDt = (now - last) / 1000;
+  const realDt = Math.min(0.25, rawDt); // zamana bağlı söndürmeler düşük FPS'te de doğru kalsın
   last = now;
   const time = now / 1000;
+  const tr = track();
+  const bpm = music.playing ? music.bpm : clock.bpm;
 
   const beat = Math.max(0, currentBeat());
   const bar = Math.floor(beat / 4);
-  const sec = sectionAt(bar);
+  const sec = tr.sectionAt(bar);
   const inBar = beat - bar * 4;
   const prog = (sec.i + inBar / 4) / sec.len;
-  const kick = kickAt(bar, Math.floor(inBar) * 4);
+  const kick = tr.kickAt(bar, Math.floor(inBar) * 4);
   const pulse = kick ? Math.exp(-fr(beat) * 7) : 0;
+  // Fever'da sahne her bölümde drop gibi davranır
+  const vis = state.fever && sec.name !== 'drop' ? { ...sec, name: 'drop', i: 4 } : sec;
 
-  state.energy = lerp(state.energy, SECTION_ENERGY[sec.name], Math.min(1, dt * 2));
-  state.hue = sec.name === 'drop' ? fr(beat / 16) : sec.name === 'groove' ? 0.88 : sec.name === 'break' ? 0.66 : 0.06;
+  state.energy = lerp(state.energy, state.fever ? 1 : SECTION_ENERGY[sec.name], Math.min(1, dt * 2));
+  state.hue = state.fever ? fr(beat / 4) : vis.name === 'drop' ? fr(beat / 16) : sec.name === 'groove' ? (tr.id === 'halay' ? 0.98 : 0.88) : sec.name === 'break' ? 0.66 : 0.06;
 
   // Bölüm geçişleri
   if (sec.name !== state.lastSec) {
-    if (sec.name === 'drop') { burstConfetti(); state.flash = 0.9; }
+    if (sec.name === 'drop') { burstConfetti(); state.flash = 0.9; firePyro(0.9); fireCO2(0.7); }
     if (sec.name === 'groove' && state.lastSec) state.flash = 0.35;
     state.lastSec = sec.name;
   }
-  if (sec.name === 'drop' && sec.i === 8 && inBar < 0.05) burstConfetti(250);
+  if (bar !== state.lastBar) {
+    if (sec.name === 'drop' && sec.i > 0 && sec.i % 8 === 0) { burstConfetti(250); firePyro(0.6); }
+    if (sec.name === 'drop' && sec.i % 4 === 2) firePyro(0.35, [hash(bar) % 2 ? 0 : 2, hash(bar) % 2 ? 3 : 1]);
+    state.lastBar = bar;
+  }
+  if (sec.name === 'build' && sec.i === sec.len - 1 && inBar >= 3 && co2.jets.length === 0 && !state.co2Fired) {
+    fireCO2(0.6);
+    state.co2Fired = true;
+  }
+  if (sec.name !== 'build') state.co2Fired = false;
   let strobe = 0;
-  if (sec.name === 'build' && sec.i === 3 && inBar < 3) strobe = fr(beat * 4) < 0.35 ? 0.22 : 0;
-  state.flash = Math.max(0, state.flash - dt * 1.6);
+  if (sec.name === 'build' && sec.i === sec.len - 1 && inBar < 3) strobe = fr(beat * 4) < 0.35 ? 0.22 : 0;
+  state.flash = Math.max(0, state.flash - realDt * 1.6);
 
   // Koreografi
   ctxObj.prog = sec.name === 'build' ? prog : 0.5;
-  const want = state.manual ?? autoMove(bar, sec);
+  const want = state.manual ?? tr.choreo(bar, sec);
   const mv = state.move;
   if (want !== mv.id) {
     mv.prev = mv.id;
     mv.id = want;
     mv.since = beat;
-    toast(MOVES[want].name);
+    if (!game.active) toast(MOVES[want].name);
     refreshChips();
   }
   let pose = evalMove(mv.id, beat, ctxObj);
@@ -761,32 +964,52 @@ function frame(now) {
     if (k >= 1) mv.prev = null;
     else pose = blendPose(evalMove(mv.prev, beat, ctxObj), pose, k);
   }
+  const crewPose = pose;
+  pose = { ...pose };
+  // Oyundaki vuruşların Clawd'a yansıması
+  const f = state.fl;
+  pose.aLr += f.armL * 1.7; pose.aLe += f.armL * 0.6;
+  pose.aRr += f.armR * 1.7; pose.aRe += f.armR * 0.6;
+  pose.crouch += f.stomp * 0.3; pose.sqY -= f.stomp * 0.1; pose.sqX += f.stomp * 0.06;
+  pose.lift += f.jump * 0.55; pose.sqY += f.jump * 0.08;
+  pose.tiltZ += f.stumble * 0.35 * f.dir; pose.eyeS *= 1 - 0.75 * f.stumble; pose.lookY -= f.stumble * 0.5;
+  const decay = Math.exp(-dt * 8);
+  f.armL *= decay; f.armR *= decay; f.stomp *= decay; f.jump *= decay; f.stumble *= Math.exp(-dt * 3);
   star.apply(pose, dt);
 
-  const lineUp = mv.id === 'halay';
-  const showBackups = bar >= 8 || state.manual;
+  const lineUp = mv.id === 'halay' || mv.id === 'omuz';
+  const showBackups = bar >= 8 || state.manual || game.active || tr.id === 'custom';
   for (const b of backups) {
     b.vis = lerp(b.vis, showBackups ? 1 : 0, Math.min(1, dt * 4));
     const pop = b.vis < 0.999 ? Math.max(0, 1 + 2.7 * Math.pow(b.vis - 1, 3) + 1.7 * Math.pow(b.vis - 1, 2)) : 1;
     b.setVisibility(pop);
     b.home.x = lerp(b.home.x, b.side * (lineUp ? 3.0 : 3.6), Math.min(1, dt * 3));
     b.home.z = lerp(b.home.z, lineUp ? 0.2 : -1.8, Math.min(1, dt * 3));
-    const p = lineUp || b.side > 0 ? pose : mirrorPose(pose);
-    b.apply(p, dt);
+    b.apply(lineUp || b.side > 0 ? crewPose : mirrorPose(crewPose), dt);
   }
 
   // Sahne
-  updateFloor(beat, sec, prog, pulse, star.root.position.x);
-  updateHeads(beat, sec, prog, pulse, state.energy);
-  updateCrowd(beat, sec, prog, state.energy);
+  updateFloor(beat, vis, prog, pulse, star.root.position.x);
+  updateHeads(beat, vis, prog, pulse, state.energy);
+  crowd.update(beat, state.fever ? 'fever' : sec.name, prog, dt);
   updateConfetti(dt, time);
+  lasers.update(beat, vis.name === 'drop' || (sec.name === 'build' && sec.i === sec.len - 1), state.hue, pulse, dt);
+  const pScale = (renderer.domElement.height / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  pyro.uniforms.uScale.value = pScale;
+  co2.uniforms.uScale.value = pScale;
+  pyro.update(Math.min(0.1, rawDt));
+  co2.update(Math.min(0.1, rawDt));
+  const fireLevel = pyro.activity;
+  pyroLights.forEach((l) => { l.intensity = lerp(l.intensity, fireLevel * (45 + 25 * Math.random()), Math.min(1, dt * 12)); });
+  smokeColor.setHSL(state.hue, 0.6, 0.6).lerp(new THREE.Color(0xffffff), 0.45);
+  smoke.update(dt, SMOKE_SEC[vis.name] * (state.quality === 'high' ? 1 : 0.6), smokeColor, camera.position);
 
   ball.rotation.y += dt * 0.6;
   sparkles.rotation.y = ball.rotation.y;
-  sparkleMat.opacity = SPARKLE_SEC[sec.name] * (0.6 + 0.4 * pulse);
+  sparkleMat.opacity = SPARKLE_SEC[vis.name] * (0.6 + 0.4 * pulse);
   dust.rotation.y += dt * 0.01;
 
-  const rimHue = sec.name === 'drop' ? fr(state.hue + 0.5) : state.hue;
+  const rimHue = vis.name === 'drop' ? fr(state.hue + 0.5) : state.hue;
   rims.forEach((l, i) => {
     l.color.setHSL(fr(rimHue + i * 0.15), 1, 0.55);
     l.intensity = 14 + 26 * state.energy + 20 * pulse;
@@ -799,19 +1022,43 @@ function frame(now) {
   }
 
   const spectrum = music.readSpectrum();
-  led.draw({ beat, pulse, spectrum, live: music.playing, sec, moveName: MOVES[mv.id].name, hue: state.hue });
+  const screenName = game.active ? `KOMBO ${game.combo}` : MOVES[mv.id].name;
+  led.draw({ beat, pulse, spectrum, live: music.playing, sec: vis, moveName: screenName, hue: state.hue });
 
-  updateCamera(beat, bar, sec, pulse, dt);
+  updateCamera(beat, bar, vis, pulse, dt);
 
   bloom.strength = 0.65 + 0.35 * state.energy + 0.35 * pulse * state.energy;
   fx.uniforms.uTime.value = time;
   fx.uniforms.uFlash.value = Math.max(state.flash, strobe);
   fx.uniforms.uAberr.value = 0.002 + 0.006 * pulse * state.energy;
 
+  // Oyun
+  game.update(beat, bpm, dt);
+  game.draw(beat, pulse, Math.min(2, window.devicePixelRatio || 1));
+
   // HUD
-  $('secLabel').textContent = sec.label;
-  $('secLabel').dataset.sec = sec.name;
+  $('secLabel').textContent = state.fever ? 'FEVER' : sec.label;
+  $('secLabel').dataset.sec = state.fever ? 'drop' : sec.name;
   $('barLabel').textContent = `BAR ${bar + 1}`;
+  if (recorder.recording) {
+    const t = recorder.elapsed;
+    $('recTime').textContent = `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+    if (t > 60) toggleRecord();
+  }
+
+  // Kasıyorsa kaliteyi bir kez otomatik düşür
+  perf.fps = lerp(perf.fps || 60, 1 / Math.max(1e-3, rawDt), 0.05);
+  if ($('intro').classList.contains('gone') && !perf.checked) {
+    perf.frames++;
+    perf.time += rawDt;
+    if (perf.time > 5) {
+      perf.checked = true;
+      if (perf.frames / perf.time < 32 && state.quality === 'high') {
+        applyQuality('low');
+        notice('Kasma algılandı, kalite düşürüldü (Q ile geri al)', 3500);
+      }
+    }
+  }
 
   composer.render(dt);
   requestAnimationFrame(frame);
@@ -826,4 +1073,11 @@ requestAnimationFrame(frame);
 window.clawdClub = {
   seek(beat) { if (music.playing) toggleMusic(false); resetSilentClock(beat); },
   move: selectMove,
+  track: (id) => switchTrack(TRACKS[id]),
+  fever: (on) => game.hooks.onFever(on),
+  pyro: () => firePyro(1),
+  game,
+  music,
+  noAutoQuality() { perf.checked = true; },
+  fps: () => perf.fps,
 };
